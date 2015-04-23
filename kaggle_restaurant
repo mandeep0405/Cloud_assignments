@@ -1,0 +1,201 @@
+##Kaggler Restaurant Revenue Prediction
+
+##Setup Environment####
+rm(list=ls())
+library('earth')
+library('data.table')
+library('ggplot2')
+library('glmnet')
+library('e1071')
+library('lars')
+library('mgcv')
+setwd('/users/xiaofeng/documents/kaggle/restaurant')
+
+##Read Data####
+rr.train.dt<-fread('train.csv')
+rr.test.dt<-fread('test.csv')
+
+##Data Cleaning + Feature Generation####
+##Convert Date
+rr.train.dt[['Open Date']]<-as.Date(rr.train.dt[['Open Date']],format='%m/%d/%Y')
+rr.test.dt[['Open Date']]<-as.Date(rr.test.dt[['Open Date']],format='%m/%d/%Y')
+##add revenue column to test data table
+rr.test.dt$revenue<-0
+##Add open days
+rr.train.dt$open.days<-as.numeric(Sys.Date()-rr.train.dt[['Open Date']])
+rr.test.dt$open.days<-as.numeric(Sys.Date()-rr.test.dt[['Open Date']])
+
+##Combined Data Table for PCA 
+rr.combined.dt<-rbind(data.table(rr.train.dt,data.type='train'),
+                      data.table(rr.test.dt,data.type='test'))
+setnames(rr.combined.dt,colnames(rr.combined.dt),make.names(colnames(rr.combined.dt)))
+
+pca.columns<-(paste('P',c(1:37),sep=''))
+pca.matrix<-rr.combined.dt[,(pca.columns),with=F]
+
+rr.combined.dt.binary.P<-data.table((rr.combined.dt[,(pca.columns),with=F]>0)*1)
+
+setnames(rr.combined.dt.binary.P,colnames(rr.combined.dt.binary.P),paste('PB',c(1:37),sep=''))
+rr.combined.dt.expand<-cbind(rr.combined.dt,rr.combined.dt.binary.P)
+rr.combined.dt.expand$open.month<-month(rr.combined.dt.expand$Open.Date)
+rr.combined.dt.expand$open.year<-year(rr.combined.dt.expand$Open.Date)
+rr.combined.dt.expand$open.in.2000<-0
+rr.combined.dt.expand$open.in.2000[which(rr.combined.dt.expand$open.year==2000)]<-1
+##Date Explore####
+unique.city.train<-unique(rr.train.dt[['City']])
+unique.city.test<-unique(rr.test.dt[['City']])
+
+##Data Visualzation
+hist(rr.train.dt$revenue)
+hist(log(rr.train.dt$revenue))
+hist((rr.test.dt$P28))
+
+ggplot(data=rr.combined.dt[data.type=='train'])+
+  geom_boxplot(aes(x=City.Group,y=log(revenue)))
+
+ggplot(data=rr.combined.dt[data.type=='train'])+
+  geom_boxplot(aes(x=Type,y=log(revenue)))
+
+ggplot(data=rr.combined.dt[data.type=='train'])+
+  geom_boxplot(aes(x=City,y=revenue))
+
+ggplot(data=rr.combined.dt.expand[data.type=='train'])+
+  geom_boxplot(aes(x=as.factor(open.month),y=log(revenue)))
+
+ggplot(data=rr.combined.dt.expand[data.type=='train'])+
+  geom_boxplot(aes(x=as.factor(open.year),y=log(revenue)))
+
+ggplot(data=rr.combined.dt.expand[data.type=='train'])+
+  geom_point(aes(x=P28,y=log(revenue)))
+
+ggplot(data=rr.combined.dt.expand[data.type=='train'])+
+  geom_point(aes(x=open.days,y=log(revenue)))+
+  geom_smooth(aes(x=open.days,y=log(revenue)))
+
+hist(rr.combined.dt.expand[data.type=='train']$open.days)
+hist(rr.combined.dt.expand[data.type=='test']$open.days)
+
+
+
+##Basic LM model:
+model.v1.lm<-lm(log(revenue)~.,data=rr.train.dt[,-which(colnames(rr.train.dt)%in%c('Id','Open Date','City')),with=F])
+model.v2.lm.step<-step(model.v1.lm,trace=F)
+summary(model.v1.lm)
+summary(model.v2.lm.step)
+
+model.v3.mars<-earth(log(revenue)~.,data=rr.combined.dt[data.type=='train',-which(colnames(rr.combined.dt)%in%c('Id','Open Date','City',"data.type",'City Group')),with=F])
+summary(model.v3.mars)
+plot(model.v2.lm.step)
+
+
+model.v3.mars.big.cities<-earth(log(revenue)~.,data=rr.combined.dt[data.type=='train' & City.Group=='Big Cities',-which(colnames(rr.combined.dt)%in%c('Id','Open Date','City',"data.type",'City.Group')),with=F])
+model.v3.mars.Other<-earth(log(revenue)~.,data=rr.combined.dt[data.type=='train' & City.Group=='Other',-which(colnames(rr.combined.dt)%in%c('Id','Open Date','City',"data.type",'City.Group')),with=F])
+
+
+##PCA regression
+pca.combined<-princomp(pca.matrix,cor=T)
+plot(pca.combined)
+biplot(pca.combined) #it will take a long time to generate the plot
+pca.var<-data.table(pca.combined$scores)
+rr.pca.combined.dt<-cbind(rr.combined.dt,pca.var)
+model.v4.mars.pca<-earth(log(revenue)~.,data=rr.pca.combined.dt[data.type=='train',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])
+
+##PCA GAM model
+model.v5.gam.pca<-gam(log(revenue)~s(open.days)+s(Comp.3)+s(Comp.7)+s(Comp.1),
+                      data=rr.pca.combined.dt[data.type=='train',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])
+
+model.v6.gam.pca<-gam((revenue)~s(open.days)+s(Comp.3)+s(Comp.7)+s(Comp.1),
+                      data=rr.pca.combined.dt[data.type=='train',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])
+
+
+
+##Prediction####
+pred.lm.v2.lm.step<-data.table(Id=rr.test.dt$Id,Prediction=exp(predict(model.v2.lm.step,newdata=rr.test.dt)))
+write.csv(pred.lm.v2.lm.step,'prediction_v2.csv',row.names=F)
+
+
+pred.model.v3.mars<-data.table(Id=rr.test.dt$Id,Prediction=exp(predict(model.v3.mars,newdata=rr.combined.dt[data.type=='test',-which(colnames(rr.combined.dt)%in%c('Id','Open Date','City',"data.type")),with=F])))
+setnames(pred.model.v3.mars,colnames(pred.model.v3.mars),c('Id','Prediction'))
+write.csv(pred.model.v3.mars,'prediction_v3.csv',row.names=F)
+
+
+pred.model.v4.mars.pca<-data.table(Id=rr.test.dt$Id,
+                                   Prediction=exp(predict(model.v4.mars.pca,newdata=rr.pca.combined.dt[data.type=='test',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])))
+setnames(pred.model.v4.mars.pca,colnames(pred.model.v4.mars.pca),c('Id','Prediction'))
+write.csv(pred.model.v4.mars.pca,'prediction_v4.csv',row.names=F)
+
+pred.model.v5.gam.pca<-data.table(Id=rr.test.dt$Id,
+                                   Prediction=exp(predict(model.v5.gam.pca,newdata=rr.pca.combined.dt[data.type=='test',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])))
+setnames(pred.model.v5.gam.pca,colnames(pred.model.v5.gam.pca),c('Id','Prediction'))
+write.csv(pred.model.v5.gam.pca,'prediction_v5.csv',row.names=F)
+
+pred.model.v6.gam.pca<-data.table(Id=rr.test.dt$Id,
+                                  Prediction=(predict(model.v6.gam.pca,newdata=rr.pca.combined.dt[data.type=='test',-which(colnames(rr.pca.combined.dt)%in%c("data.type")),with=F])))
+setnames(pred.model.v6.gam.pca,colnames(pred.model.v6.gam.pca),c('Id','Prediction'))
+write.csv(pred.model.v6.gam.pca,'prediction_v6.csv',row.names=F)
+
+
+big.city.pred.data=rr.combined.dt[data.type=='test' & City.Group=='Big Cities',-which(colnames(rr.combined.dt)%in%c('Open Date','City',"data.type")),with=F]
+big.city.pred<-data.table(Id=big.city.pred.data$Id,Pred=exp(predict(model.v3.mars.big.cities,big.city.pred.data)))
+other.pred.data=rr.combined.dt[data.type=='test' & City.Group=='Other',-which(colnames(rr.combined.dt)%in%c('Open Date','City',"data.type")),with=F]
+other.pred<-data.table(Id=other.pred.data$Id,Pred=exp(predict(model.v3.mars.Other,other.pred.data)))
+model.v3.mars.by.city.type.pred<-rbind(big.city.pred,other.pred)
+model.v3.mars.by.city.type.pred<-model.v3.mars.by.city.type.pred[order(Id)]
+setnames(model.v3.mars.by.city.type.pred,colnames(model.v3.mars.by.city.type.pred),c('Id','Prediction'))
+write.csv(model.v3.mars.by.city.type.pred,'prediction_v7.csv',row.names=F)
+
+
+
+##LARS+GAM: Best Model right now
+x.glmnet<-as.matrix(rr.combined.dt[data.type=='train',-which(colnames(rr.combined.dt)%in%c('Id','Open.Date','City',"data.type",'revenue','City.Group','Type')),with=F])
+y.glmnet<-log(as.matrix(rr.combined.dt[data.type=='train',which(colnames(rr.combined.dt)%in%c('revenue')),with=F]))
+#model.v7.glmnet<-glmnet(x.glmnet,y.glmnet)
+model.v8.glmnet<-lars(x.glmnet,y.glmnet,type='lar')
+cv.value<-cv.lars(x.glmnet,y.glmnet,type='lar')
+
+
+
+model.v8.lars.gam<-gam(log(revenue)~s(open.days)+s(P28,k=6)+s(P2,k=3)+s(P34,k=4)+s(P8,k=4),
+                       data=rr.combined.dt[data.type=='train',-which(colnames(rr.combined.dt)%in%c('Id','Open.Date','City',"data.type")),with=F])
+summary(model.v8.lars.gam)
+plotmo(model.v8.lars.gam,se=T)
+pred.v8.gam<-data.table(Id=rr.test.dt$Id,
+  Prediction=exp(predict(model.v8.lars.gam,newdata=rr.combined.dt[data.type=='test',-which(colnames(rr.combined.dt)%in%c("data.type")),with=F],type='response')))
+
+write.csv(pred.v8.gam,'prediction_v8.csv',row.names=F)
+
+
+
+
+
+##LARS with Expand Data
+x.glmnet<-as.matrix(rr.combined.dt.expand[data.type=='train',-which(colnames(rr.combined.dt.expand)%in%c('Id','Open.Date','City',"data.type",'revenue','City.Group','Type','open.year')),with=F])
+y.glmnet<-log(as.matrix(rr.combined.dt.expand[data.type=='train',which(colnames(rr.combined.dt.expand)%in%c('revenue')),with=F]))
+
+model.v9.lars.expand.dt<-lars(x.glmnet,y.glmnet,type='lar')
+cv.value<-cv.lars(x.glmnet,y.glmnet,type='lasso')
+
+
+
+model.v9.lars.gam<-gam(log(revenue)~s(open.year)+s(P28,k=5),data=rr.combined.dt.expand[data.type=='train',-which(colnames(rr.combined.dt.expand)%in%c('Id','Open.Date','City',"data.type")),with=F])
+plotmo(model.v9.lars.gam,se=T)
+pred.v9.gam<-data.table(Id=rr.test.dt$Id,
+                        Prediction=exp(predict(model.v9.lars.gam,newdata=rr.combined.dt.expand[data.type=='test',-which(colnames(rr.combined.dt.expand)%in%c("data.type")),with=F],type='response')))
+
+write.csv(pred.v9.gam,'prediction_v9_openyear.csv',row.names=F)
+
+
+##LARS with PCA Data
+rr.pca.combined.dt<-cbind(rr.combined.dt,pca.var[,c(1:30),with=F])
+x.glmnet<-as.matrix(rr.pca.combined.dt[data.type=='train',-which(colnames(rr.pca.combined.dt)%in%c('Id','Open.Date','City',"data.type",'revenue','City.Group','Type')),with=F])
+y.glmnet<-log(as.matrix(rr.pca.combined.dt[data.type=='train',which(colnames(rr.pca.combined.dt)%in%c('revenue')),with=F]))
+
+model.v10.lars.pca.dt<-lars(x.glmnet,y.glmnet,type='lasso')
+cv.value<-cv.lars(x.glmnet,y.glmnet,type='lasso')
+
+model.v10.lars.gam<-gam(log(revenue)~s(open.days)+s(P28,k=3)+s(P2,k=3)+s(Comp.3,k=5),data=rr.pca.combined.dt[data.type=='train',-which(colnames(rr.combined.dt.expand)%in%c('Id','Open.Date','City',"data.type")),with=F])
+plotmo(model.v10.lars.gam,se=T)
+pred.v10.gam<-data.table(Id=rr.test.dt$Id,
+                        Prediction=exp(predict(model.v10.lars.gam,newdata=rr.pca.combined.dt[data.type=='test',-which(colnames(rr.combined.dt.expand)%in%c("data.type")),with=F],type='response')))
+
+write.csv(pred.v10.gam,'prediction_v10.csv',row.names=F)
